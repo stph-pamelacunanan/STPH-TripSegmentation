@@ -126,7 +126,7 @@ def obtain_route_dict(path_of_gtfs_shapefiles, min_dist = 100, max_dist = 150):
     routes_dict = {}
     
     for txt_file in txt_files:
-        file_path = os.path.join(folder, txt_file)
+        file_path = os.path.join(path_of_gtfs_shapefiles, txt_file)
         
         # Get the df
         my_route = txt_to_df(file_path)
@@ -228,7 +228,7 @@ def nearest_stop_checker(vehicle_feeds_df, routes_dict, trip_type, dist_cutoff =
     Finds the nearest stop for each GPS point in vehicle_feeds_df within a 50-meter radius
     and returns the original DataFrame with an added 'stop_id' column.
 
-    :param vehicle_feeds_df: DataFrame with columns ["latitude", "longitude"] (vehicle positions).
+    :param vehicle_feeds_df: DataFrame with columns ["latitude", "longitude", "route"].
     :param trip_type: string, either 'inbound' or 'outbound'
     :return: Original vehicle_feeds_df with an added 'stop_id' column.
     """
@@ -374,85 +374,88 @@ def trip_segmentation(vehicle_feeds_df, routes_dict, my_dist_cutoff, zero_cutoff
 
     ################################## ------------ OUTBOUND TRIPS ------------ ##################################
     
-    # Step 2
-    outbound = nearest_stop_checker(vehicle_feeds_df = vehicle_feeds_engineOn,
+    if len(vehicle_feeds_engineOn) > 0:
+        # Step 2
+        outbound = nearest_stop_checker(vehicle_feeds_df = vehicle_feeds_engineOn,
+                                        routes_dict = routes_dict, 
+                                        trip_type = 'outbound', dist_cutoff = my_dist_cutoff)
+
+        # Step 3
+        outbound_trips = sequence_checker(outbound, trip_type = 'outbound')
+
+        # Step 4
+        outbound_completeTrips_identifiers = trip_validator(outbound_trips, trip_type = 'outbound',
+                                                            routes_dict = routes_dict, 
+                                                            dist_threshold = my_dist_threshold, time_threshold = my_time_threshold)
+
+        # Step 5
+        outbound_cutTrips_identifiers = cut_trips_determinant(outbound_trips, trip_type = 'outbound',
+                                                            routes_dict = routes_dict, 
+                                                            dist_threshold = my_dist_threshold)
+
+        # Step 6
+        outbound_completeTrips = outbound_trips.loc[outbound_trips['identifier'].isin(outbound_completeTrips_identifiers),
+                                                    ['imei', 'timestamp', 'longitude', 'latitude',
+                                                    'identifier']].reset_index(drop=True)
+        outbound_cutTrips = outbound_trips.loc[outbound_trips['identifier'].isin(outbound_cutTrips_identifiers),
+                                                ['imei', 'timestamp', 'longitude', 'latitude',
+                                                'identifier']].reset_index(drop=True)
+        outbound_cutTrips['identifier'] = outbound_cutTrips['identifier'].str.replace("trip", "cuttrip", regex=False)
+        
+        outbound_trips = pd.concat([outbound_completeTrips, outbound_cutTrips], ignore_index=True)
+        vehicle_feeds_engineOn = vehicle_feeds_engineOn.drop(columns = ['identifier'])
+        vehicle_feeds_engineOn = vehicle_feeds_engineOn.merge(outbound_trips,
+                                                            on = ['imei', 'timestamp', 'longitude', 'latitude'],
+                                                            how = 'left')
+        vehicle_feeds_engineOn['identifier'] = vehicle_feeds_engineOn['identifier'].fillna('')
+
+        ################################## ------------ INBOUND TRIPS ------------ ##################################
+
+        # Step 2
+        inbound = nearest_stop_checker(vehicle_feeds_df = vehicle_feeds_engineOn,
                                     routes_dict = routes_dict, 
-                                    trip_type = 'outbound', dist_cutoff = my_dist_cutoff)
+                                    trip_type = 'inbound', dist_cutoff = my_dist_cutoff)
 
-    # Step 3
-    outbound_trips = sequence_checker(outbound, trip_type = 'outbound')
+        # Step 3
+        inbound_trips = sequence_checker(inbound, trip_type = 'inbound')
 
-    # Step 4
-    outbound_completeTrips_identifiers = trip_validator(outbound_trips, trip_type = 'outbound',
+        # Step 4
+        inbound_completeTrips_identifiers = trip_validator(inbound_trips, trip_type = 'inbound',
                                                         routes_dict = routes_dict, 
                                                         dist_threshold = my_dist_threshold, time_threshold = my_time_threshold)
 
-    # Step 5
-    outbound_cutTrips_identifiers = cut_trips_determinant(outbound_trips, trip_type = 'outbound',
-                                                          routes_dict = routes_dict, 
-                                                          dist_threshold = my_dist_threshold)
+        # Step 5
+        inbound_cutTrips_identifiers = cut_trips_determinant(inbound_trips, trip_type = 'inbound',
+                                                            routes_dict = routes_dict, 
+                                                            dist_threshold = my_dist_threshold)
 
-    # Step 6
-    outbound_completeTrips = outbound_trips.loc[outbound_trips['identifier'].isin(outbound_completeTrips_identifiers),
+        # Step 6
+        inbound_completeTrips = inbound_trips.loc[inbound_trips['identifier'].isin(inbound_completeTrips_identifiers),
                                                 ['imei', 'timestamp', 'longitude', 'latitude',
-                                                 'identifier']].reset_index(drop=True)
-    outbound_cutTrips = outbound_trips.loc[outbound_trips['identifier'].isin(outbound_cutTrips_identifiers),
+                                                'identifier']].reset_index(drop=True)
+        inbound_cutTrips = inbound_trips.loc[inbound_trips['identifier'].isin(inbound_cutTrips_identifiers),
                                             ['imei', 'timestamp', 'longitude', 'latitude',
-                                             'identifier']].reset_index(drop=True)
-    outbound_cutTrips['identifier'] = outbound_cutTrips['identifier'].str.replace("trip", "cuttrip", regex=False)
-    
-    outbound_trips = pd.concat([outbound_completeTrips, outbound_cutTrips], ignore_index=True)
-    vehicle_feeds_engineOn = vehicle_feeds_engineOn.drop(columns = ['identifier'])
-    vehicle_feeds_engineOn = vehicle_feeds_engineOn.merge(outbound_trips,
-                                                          on = ['imei', 'timestamp', 'longitude', 'latitude'],
-                                                          how = 'left')
-    vehicle_feeds_engineOn['identifier'] = vehicle_feeds_engineOn['identifier'].fillna('')
+                                            'identifier']].reset_index(drop=True)
+        inbound_cutTrips['identifier'] = inbound_cutTrips['identifier'].str.replace("trip", "cuttrip", regex=False)
+        
+        inbound_trips = pd.concat([inbound_completeTrips, inbound_cutTrips], ignore_index=True)
 
-    ################################## ------------ INBOUND TRIPS ------------ ##################################
+        vehicle_feeds_engineOn = vehicle_feeds_engineOn.merge(inbound_trips,
+                                                            on = ['imei', 'timestamp', 'longitude', 'latitude'],
+                                                            how = 'left', 
+                                                            suffixes = ("_outbound", "_inbound"))
+        # Fix the identifier column (it has been doubled)
+        vehicle_feeds_engineOn["trip_identifier"] = np.where(vehicle_feeds_engineOn["identifier_outbound"] == "",
+                                            vehicle_feeds_engineOn["identifier_inbound"],
+                                            vehicle_feeds_engineOn["identifier_outbound"])
+        vehicle_feeds_engineOn = vehicle_feeds_engineOn.drop(columns = ['identifier_outbound', 'identifier_inbound'])
 
-    # Step 2
-    inbound = nearest_stop_checker(vehicle_feeds_df = vehicle_feeds_engineOn,
-                                   routes_dict = routes_dict, 
-                                   trip_type = 'inbound', dist_cutoff = my_dist_cutoff)
-
-    # Step 3
-    inbound_trips = sequence_checker(inbound, trip_type = 'inbound')
-
-    # Step 4
-    inbound_completeTrips_identifiers = trip_validator(inbound_trips, trip_type = 'inbound',
-                                                       routes_dict = routes_dict, 
-                                                       dist_threshold = my_dist_threshold, time_threshold = my_time_threshold)
-
-    # Step 5
-    inbound_cutTrips_identifiers = cut_trips_determinant(inbound_trips, trip_type = 'inbound',
-                                                         routes_dict = routes_dict, 
-                                                         dist_threshold = my_dist_threshold)
-
-    # Step 6
-    inbound_completeTrips = inbound_trips.loc[inbound_trips['identifier'].isin(inbound_completeTrips_identifiers),
-                                              ['imei', 'timestamp', 'longitude', 'latitude',
-                                               'identifier']].reset_index(drop=True)
-    inbound_cutTrips = inbound_trips.loc[inbound_trips['identifier'].isin(inbound_cutTrips_identifiers),
-                                         ['imei', 'timestamp', 'longitude', 'latitude',
-                                          'identifier']].reset_index(drop=True)
-    inbound_cutTrips['identifier'] = inbound_cutTrips['identifier'].str.replace("trip", "cuttrip", regex=False)
-    
-    inbound_trips = pd.concat([inbound_completeTrips, inbound_cutTrips], ignore_index=True)
-
-    vehicle_feeds_engineOn = vehicle_feeds_engineOn.merge(inbound_trips,
-                                                          on = ['imei', 'timestamp', 'longitude', 'latitude'],
-                                                          how = 'left', 
-                                                          suffixes = ("_outbound", "_inbound"))
-    # Fix the identifier column (it has been doubled)
-    vehicle_feeds_engineOn["trip_identifier"] = np.where(vehicle_feeds_engineOn["identifier_outbound"] == "",
-                                           vehicle_feeds_engineOn["identifier_inbound"],
-                                           vehicle_feeds_engineOn["identifier_outbound"])
-    vehicle_feeds_engineOn = vehicle_feeds_engineOn.drop(columns = ['identifier_outbound', 'identifier_inbound'])
-
-    # Return only the vehicle feeds with identified trip
-    return vehicle_feeds_engineOn[(vehicle_feeds_engineOn['trip_identifier'] != '') & \
-                                  (vehicle_feeds_engineOn['trip_identifier'].notna())].sort_values( \
-                                        by = ['deviceCode', 'timestamp']).reset_index(drop = True)
+        # Return only the vehicle feeds with identified trip
+        return vehicle_feeds_engineOn[(vehicle_feeds_engineOn['trip_identifier'] != '') & \
+                                    (vehicle_feeds_engineOn['trip_identifier'].notna())].sort_values( \
+                                            by = ['deviceCode', 'timestamp']).reset_index(drop = True)
+    else:
+        print("Vehicle is idle the whole time.")
 
 def tripSummarizer(vehicle_feeds_with_trip_id):
     return vehicle_feeds_with_trip_id.groupby('trip_identifier').agg(
