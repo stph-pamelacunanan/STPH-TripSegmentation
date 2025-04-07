@@ -223,13 +223,14 @@ def route_gtfs_stops_mapper(df, latitude_name = 'latitude', longitude_name = 'lo
 
 #######################################################################################################################################
 
-def nearest_stop_checker(vehicle_feeds_df, routes_dict, trip_type, dist_cutoff = 50):
+def nearest_stop_checker(vehicle_feeds_df, routes_dict, trip_type, dist_cutoff = 50, stph_app_bool = False):
     """
     Finds the nearest stop for each GPS point in vehicle_feeds_df within a 50-meter radius
     and returns the original DataFrame with an added 'stop_id' column.
 
-    :param vehicle_feeds_df: DataFrame with columns ["latitude", "longitude", "route"].
+    :param vehicle_feeds_df: DataFrame with columns ["latitude", "longitude"] (vehicle positions).
     :param trip_type: string, either 'inbound' or 'outbound'
+    :param stph_app_bool: bool, indicates whether the inpute vehicle feeds is from the STPH mobile app
     :return: Original vehicle_feeds_df with an added 'stop_id' column.
     """
     
@@ -264,69 +265,91 @@ def nearest_stop_checker(vehicle_feeds_df, routes_dict, trip_type, dist_cutoff =
 
     # Assign NA to "stop_id" if the "identifier" column is non-NA
     vehicle_feeds_df.loc[vehicle_feeds_df['identifier'] != '', 'stop_id'] = np.nan
-    
-    return vehicle_feeds_df[['imei', 'timestamp', 'latitude', 'longitude', 'distanceTravelled',
-                             'stop_id', 'route', 'identifier']]
 
-def sequence_checker(df, trip_type, zero_cutoff = 60):
+    if stph_app_bool:
+        return vehicle_feeds_df[['row_index', 'timestamp', 'latitude', 'longitude',
+                                 'distance_travelled', 'stop_id', 'route', 'identifier']]
+    else:
+        return vehicle_feeds_df[['imei', 'timestamp', 'latitude', 'longitude',
+                                 'distanceTravelled', 'stop_id', 'route', 'identifier']]
+
+def sequence_checker(df, trip_type, zero_cutoff=60, gap_in_minutes = 30):
     """
     Groups stop_id sequences that are non-decreasing and assigns a trip identifier.
     Stops counting when encountering NaN in stop_id and does not start new sequences with NaN.
+    Stops sequences if the gap between timestamps is greater than 30 minutes.
 
     :param df: DataFrame with columns ["timestamp", "latitude", "longitude", "stop_id"]
     :param trip_type: string, either 'inbound' or 'outbound'
     :param zero_cutoff: Number of consecutive zeros to stop the trip sequence. 60 to represent 60 secs or 1 min.
+    :param gap_in_minutes: Maximum no. of minutes allowable for a gap between two points for them to be in the same trip
     :return: DataFrame with an additional "identifier" column.
     """
     df = df.copy()
+    df["identifier"] = None
 
     current_identifier = None
     start_timestamp = None
+    last_timestamp = None  # New: Keep track of the previous timestamp
     last_stop_id = 0
     zero_count = 0
     in_sequence = False
 
     for i, row in df.iterrows():
         stop_id = row["stop_id"]
-        
+        current_timestamp = row["timestamp"]
+
         # Stop sequence if stop_id is NaN
         if pd.isna(stop_id):
             in_sequence = False
             current_identifier = None
-            zero_count = 0  # Reset zero counter
+            zero_count = 0
             continue
-        
+
         # If stop_id is zero, count consecutive zeros
         if stop_id == 0:
             zero_count += 1
             if zero_count > zero_cutoff and in_sequence:
-                in_sequence = False  # Stop sequence
+                in_sequence = False
                 current_identifier = None
             continue
         else:
-            zero_count = 0  # Reset zero counter if stop_id is nonzero
+            zero_count = 0
 
-        # Start a new sequence if:
-        # 1. We are not in a sequence
-        # 2. stop_id is nonzero and NOT NaN
-        if not in_sequence and (stop_id > 0  and pd.notna(stop_id)):
-            start_timestamp = row["timestamp"]
+        # New Logic:
+        # Break sequence if the time gap is greater than the specified number of minutes
+        if in_sequence and last_timestamp is not None:
+            time_gap = (current_timestamp - last_timestamp).total_seconds()  # Compute the time gap in seconds
+            if time_gap > (gap_in_minutes * 60):  # 1800 seconds = 30 minutes
+                in_sequence = False
+                current_identifier = None
+
+        # Start a new sequence if not in sequence and stop_id is valid
+        if not in_sequence and (stop_id > 0 and pd.notna(stop_id)):
+            start_timestamp = current_timestamp
             current_identifier = f"{trip_type}_trip_{start_timestamp.strftime('%Y%m%d_%H%M%S')}"
             in_sequence = True
 
-        # If we are in a sequence, ensure non-decreasing stop_id
+        # If in a sequence, and stop_id is non-decreasing
         if in_sequence:
-            if stop_id < last_stop_id:  # If stop_id decreases, stop the sequence
+            if stop_id < last_stop_id:
                 in_sequence = False
                 current_identifier = None
             else:
-                df.at[i, "identifier"] = current_identifier  # Assign trip ID
+                df.at[i, "identifier"] = current_identifier
 
-        last_stop_id = stop_id  # Update last stop_id
+        last_stop_id = stop_id
+        last_timestamp = current_timestamp  # Update last_timestamp
 
     return df
 
-def trip_validator(trips, trip_type, routes_dict, dist_threshold = 0.7, time_threshold = 15):
+def trip_validator(trips, trip_type, routes_dict, dist_threshold = 0.7, time_threshold = 15, stph_app_bool = False):
+
+    # Specify travelled distance column name
+    if stph_app_bool:
+        dist_colname = 'distance_travelled'
+    else:
+        dist_colname = 'distanceTravelled'
     
     # Get the expected distance from the trip_type and route
     route_id = trips['route'].values[0]
@@ -337,7 +360,7 @@ def trip_validator(trips, trip_type, routes_dict, dist_threshold = 0.7, time_thr
     trip_summary = trips[trips['identifier'] != ''].groupby('identifier').agg(
         start_time = ('timestamp', 'min'),
         time_diff = ('timestamp', lambda x: (x.max() - x.min()).total_seconds() / 60),
-        distance = ('distanceTravelled', 'sum'))
+        distance = (dist_colname, 'sum'))
     trip_summary = trip_summary.reset_index()
     valid_trips = trip_summary[(trip_summary['time_diff'] > time_threshold) & \
                     (trip_summary['distance'] >= (dist_threshold * expected_dist))].reset_index(drop=True)
@@ -345,8 +368,14 @@ def trip_validator(trips, trip_type, routes_dict, dist_threshold = 0.7, time_thr
     # Return the identifiers of the valid trips
     return valid_trips['identifier'].values.tolist()
 
-def cut_trips_determinant(trips, trip_type, routes_dict, dist_threshold = 0.7):
-    
+def cut_trips_determinant(trips, trip_type, routes_dict, dist_threshold = 0.7, stph_app_bool = False):
+
+    # Specify travelled distance column name
+    if stph_app_bool:
+        dist_colname = 'distance_travelled'
+    else:
+        dist_colname = 'distanceTravelled'
+        
     # Get the expected distance from the trip_type and route
     route_id = trips['route'].values[0]
     route_stops_df = routes_dict[route_id][trip_type]
@@ -356,7 +385,7 @@ def cut_trips_determinant(trips, trip_type, routes_dict, dist_threshold = 0.7):
     trip_summary = trips[trips['identifier'] != ''].groupby('identifier').agg(
         start_time = ('timestamp', 'min'),
         time_diff = ('timestamp', lambda x: (x.max() - x.min()).total_seconds() / 60),
-        distance = ('distanceTravelled', 'sum'))
+        distance = (dist_colname, 'sum'))
     trip_summary = trip_summary.reset_index()
     cut_trips = trip_summary[(trip_summary['distance'] >= 1) & \
                     (trip_summary['distance'] < (dist_threshold * expected_dist))].reset_index(drop=True)
@@ -364,85 +393,98 @@ def cut_trips_determinant(trips, trip_type, routes_dict, dist_threshold = 0.7):
     # Return the identifiers of the cut trips
     return cut_trips['identifier'].values.tolist()
 
-def trip_segmentation(vehicle_feeds_df, routes_dict, my_dist_cutoff, zero_cutoff, my_dist_threshold, my_time_threshold):
+def trip_segmentation(vehicle_feeds_df, routes_dict, my_dist_cutoff, zero_cutoff,
+                      my_dist_threshold, my_time_threshold, max_time_gap = 30, STPHapp_indicator = False): 
     
     # Step 1
     vehicle_feeds = vehicle_feeds_df.copy()
-    vehicle_feeds_engineOn = vehicle_feeds[vehicle_feeds['engineRpm'] > 0].reset_index(drop=True)
-    vehicle_feeds_engineOn['identifier'] = ''   ## Initialize an empty "identifier" column (similar to a trip_id)
-    vehicle_feeds_engineOn = vehicle_feeds_engineOn.sort_values(by = ['timestamp'])   ## Ensure data is in chronological order
+    if STPHapp_indicator:
+        vehicle_feeds_engineOn = vehicle_feeds.reset_index(drop=True)
+        vehicle_feeds_engineOn['row_index'] = np.arange(len(vehicle_feeds_engineOn))  # Unique index for each row
+        columns_to_save = ['row_index', 'timestamp', 'longitude', 'latitude', 'identifier']
+        keys_to_merge_on = ['row_index', 'timestamp', 'longitude', 'latitude']
+        vehicle_identifier = 'plate_number'
+    else:
+        vehicle_feeds_engineOn = vehicle_feeds[vehicle_feeds['engineRpm'] > 0].reset_index(drop=True)
+        columns_to_save = ['imei', 'timestamp', 'longitude', 'latitude', 'identifier']
+        keys_to_merge_on = ['imei', 'timestamp', 'longitude', 'latitude']
+        vehicle_identifier = 'deviceCode'
 
-    ################################## ------------ OUTBOUND TRIPS ------------ ##################################
-    
     if len(vehicle_feeds_engineOn) > 0:
+        vehicle_feeds_engineOn['identifier'] = ''   ## Initialize an empty "identifier" column (similar to a trip_id)
+        vehicle_feeds_engineOn = vehicle_feeds_engineOn.sort_values(by = ['timestamp'])   ## Ensure data is in chronological order
+
+        ################################## ------------ OUTBOUND TRIPS ------------ ##################################
+        
         # Step 2
         outbound = nearest_stop_checker(vehicle_feeds_df = vehicle_feeds_engineOn,
                                         routes_dict = routes_dict, 
-                                        trip_type = 'outbound', dist_cutoff = my_dist_cutoff)
+                                        trip_type = 'outbound', dist_cutoff = my_dist_cutoff,
+                                        stph_app_bool = STPHapp_indicator)
 
         # Step 3
-        outbound_trips = sequence_checker(outbound, trip_type = 'outbound')
+        outbound_trips = sequence_checker(outbound, trip_type = 'outbound', gap_in_minutes = max_time_gap)
 
         # Step 4
         outbound_completeTrips_identifiers = trip_validator(outbound_trips, trip_type = 'outbound',
                                                             routes_dict = routes_dict, 
-                                                            dist_threshold = my_dist_threshold, time_threshold = my_time_threshold)
+                                                            dist_threshold = my_dist_threshold, time_threshold = my_time_threshold,
+                                                            stph_app_bool = STPHapp_indicator)
 
         # Step 5
         outbound_cutTrips_identifiers = cut_trips_determinant(outbound_trips, trip_type = 'outbound',
                                                             routes_dict = routes_dict, 
-                                                            dist_threshold = my_dist_threshold)
+                                                            dist_threshold = my_dist_threshold,
+                                                            stph_app_bool = STPHapp_indicator)
 
         # Step 6
         outbound_completeTrips = outbound_trips.loc[outbound_trips['identifier'].isin(outbound_completeTrips_identifiers),
-                                                    ['imei', 'timestamp', 'longitude', 'latitude',
-                                                    'identifier']].reset_index(drop=True)
+                                                    columns_to_save].reset_index(drop=True)
         outbound_cutTrips = outbound_trips.loc[outbound_trips['identifier'].isin(outbound_cutTrips_identifiers),
-                                                ['imei', 'timestamp', 'longitude', 'latitude',
-                                                'identifier']].reset_index(drop=True)
+                                            columns_to_save].reset_index(drop=True)
         outbound_cutTrips['identifier'] = outbound_cutTrips['identifier'].str.replace("trip", "cuttrip", regex=False)
         
         outbound_trips = pd.concat([outbound_completeTrips, outbound_cutTrips], ignore_index=True)
         vehicle_feeds_engineOn = vehicle_feeds_engineOn.drop(columns = ['identifier'])
         vehicle_feeds_engineOn = vehicle_feeds_engineOn.merge(outbound_trips,
-                                                            on = ['imei', 'timestamp', 'longitude', 'latitude'],
+                                                            on = keys_to_merge_on,
                                                             how = 'left')
         vehicle_feeds_engineOn['identifier'] = vehicle_feeds_engineOn['identifier'].fillna('')
 
         ################################## ------------ INBOUND TRIPS ------------ ##################################
 
-        # Step 2
+        # Step 7
         inbound = nearest_stop_checker(vehicle_feeds_df = vehicle_feeds_engineOn,
                                     routes_dict = routes_dict, 
-                                    trip_type = 'inbound', dist_cutoff = my_dist_cutoff)
+                                    trip_type = 'inbound', dist_cutoff = my_dist_cutoff,
+                                    stph_app_bool = STPHapp_indicator)
 
-        # Step 3
-        inbound_trips = sequence_checker(inbound, trip_type = 'inbound')
+        # Step 8
+        inbound_trips = sequence_checker(inbound, trip_type = 'inbound', gap_in_minutes = max_time_gap)
 
-        # Step 4
+        # Step 9
         inbound_completeTrips_identifiers = trip_validator(inbound_trips, trip_type = 'inbound',
                                                         routes_dict = routes_dict, 
-                                                        dist_threshold = my_dist_threshold, time_threshold = my_time_threshold)
+                                                        dist_threshold = my_dist_threshold, time_threshold = my_time_threshold,
+                                                        stph_app_bool = STPHapp_indicator)
 
-        # Step 5
+        # Step 10
         inbound_cutTrips_identifiers = cut_trips_determinant(inbound_trips, trip_type = 'inbound',
                                                             routes_dict = routes_dict, 
-                                                            dist_threshold = my_dist_threshold)
+                                                            dist_threshold = my_dist_threshold,
+                                                            stph_app_bool = STPHapp_indicator)
 
-        # Step 6
+        # Step 11
         inbound_completeTrips = inbound_trips.loc[inbound_trips['identifier'].isin(inbound_completeTrips_identifiers),
-                                                ['imei', 'timestamp', 'longitude', 'latitude',
-                                                'identifier']].reset_index(drop=True)
+                                                columns_to_save].reset_index(drop=True)
         inbound_cutTrips = inbound_trips.loc[inbound_trips['identifier'].isin(inbound_cutTrips_identifiers),
-                                            ['imei', 'timestamp', 'longitude', 'latitude',
-                                            'identifier']].reset_index(drop=True)
+                                            columns_to_save].reset_index(drop=True)
         inbound_cutTrips['identifier'] = inbound_cutTrips['identifier'].str.replace("trip", "cuttrip", regex=False)
         
         inbound_trips = pd.concat([inbound_completeTrips, inbound_cutTrips], ignore_index=True)
 
         vehicle_feeds_engineOn = vehicle_feeds_engineOn.merge(inbound_trips,
-                                                            on = ['imei', 'timestamp', 'longitude', 'latitude'],
-                                                            how = 'left', 
+                                                            on = keys_to_merge_on, how = 'left', 
                                                             suffixes = ("_outbound", "_inbound"))
         # Fix the identifier column (it has been doubled)
         vehicle_feeds_engineOn["trip_identifier"] = np.where(vehicle_feeds_engineOn["identifier_outbound"] == "",
@@ -451,14 +493,22 @@ def trip_segmentation(vehicle_feeds_df, routes_dict, my_dist_cutoff, zero_cutoff
         vehicle_feeds_engineOn = vehicle_feeds_engineOn.drop(columns = ['identifier_outbound', 'identifier_inbound'])
 
         # Return only the vehicle feeds with identified trip
-        return vehicle_feeds_engineOn[(vehicle_feeds_engineOn['trip_identifier'] != '') & \
-                                    (vehicle_feeds_engineOn['trip_identifier'].notna())].sort_values( \
-                                            by = ['deviceCode', 'timestamp']).reset_index(drop = True)
+        resulting_df = vehicle_feeds_engineOn[(vehicle_feeds_engineOn['trip_identifier'] != '') & \
+            (vehicle_feeds_engineOn['trip_identifier'].notna())].sort_values( \
+                by = [vehicle_identifier, 'timestamp']).reset_index(drop = True)
+        if STPHapp_indicator:
+            return resulting_df.drop(columns = ['row_index'])
+        else:
+            return resulting_df
     else:
-        print("Vehicle is idle the whole time.")
+        return pd.DataFrame()
 
-def tripSummarizer(vehicle_feeds_with_trip_id):
+def tripSummarizer(vehicle_feeds_with_trip_id, stph_app_bool = False):
+    if stph_app_bool:
+        dist_colname = 'distance_travelled'
+    else:
+        dist_colname = 'distanceTravelled'
     return vehicle_feeds_with_trip_id.groupby('trip_identifier').agg(
         start_time = ('timestamp', 'min'),
         time_diff = ('timestamp', lambda x: (x.max() - x.min()).total_seconds() / 60),
-        distance = ('distanceTravelled', 'sum')).reset_index().sort_values(by = ['trip_identifier'])
+        distance = (dist_colname, 'sum')).reset_index().sort_values(by = ['trip_identifier'])
