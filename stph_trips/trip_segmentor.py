@@ -411,6 +411,7 @@ def trip_segmentation(vehicle_feeds_df, routes_dict, my_dist_cutoff, zero_cutoff
         vehicle_identifier = 'deviceCode'
 
     if len(vehicle_feeds_engineOn) > 0:
+        vehicle = str(vehicle_feeds_engineOn[vehicle_identifier].values[0])
         vehicle_feeds_engineOn['identifier'] = ''   ## Initialize an empty "identifier" column (similar to a trip_id)
         vehicle_feeds_engineOn = vehicle_feeds_engineOn.sort_values(by = ['timestamp'])   ## Ensure data is in chronological order
 
@@ -443,6 +444,10 @@ def trip_segmentation(vehicle_feeds_df, routes_dict, my_dist_cutoff, zero_cutoff
         outbound_cutTrips = outbound_trips.loc[outbound_trips['identifier'].isin(outbound_cutTrips_identifiers),
                                             columns_to_save].reset_index(drop=True)
         outbound_cutTrips['identifier'] = outbound_cutTrips['identifier'].str.replace("trip", "cuttrip", regex=False)
+
+        # Step 6.1 - Add the vehicle code in the trip_identifier
+        outbound_completeTrips['identifier'] = vehicle + "_" + outbound_completeTrips['identifier']
+        outbound_cutTrips['identifier'] = vehicle + "_" + outbound_cutTrips['identifier']
         
         outbound_trips = pd.concat([outbound_completeTrips, outbound_cutTrips], ignore_index=True)
         vehicle_feeds_engineOn = vehicle_feeds_engineOn.drop(columns = ['identifier'])
@@ -480,6 +485,10 @@ def trip_segmentation(vehicle_feeds_df, routes_dict, my_dist_cutoff, zero_cutoff
         inbound_cutTrips = inbound_trips.loc[inbound_trips['identifier'].isin(inbound_cutTrips_identifiers),
                                             columns_to_save].reset_index(drop=True)
         inbound_cutTrips['identifier'] = inbound_cutTrips['identifier'].str.replace("trip", "cuttrip", regex=False)
+
+        # Step 11.1 - Add the vehicle code in the trip_identifier
+        inbound_completeTrips['identifier'] = vehicle + "_" + inbound_completeTrips['identifier']
+        inbound_cutTrips['identifier'] = vehicle + "_" + inbound_cutTrips['identifier']
         
         inbound_trips = pd.concat([inbound_completeTrips, inbound_cutTrips], ignore_index=True)
 
