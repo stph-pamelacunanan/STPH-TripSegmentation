@@ -206,8 +206,8 @@ def tripSuperSummary_telematics(vehicle_feeds_with_tripID, speed_cutoff = 5,
         ## Metadata
         imei = df['imei'].values[0]
         route = df['route'].values[0]
-        trip_type = df['trip_identifier'].str.split("_").str[0].str.capitalize().values[0]
-        trip_type2 = df['trip_identifier'].str.split("_").str[1].str.capitalize().values[0]
+        trip_type = df['trip_identifier'].str.split("_").str[1].str.capitalize().values[0]
+        trip_type2 = df['trip_identifier'].str.split("_").str[2].str.capitalize().values[0]
         if trip_type2 == 'Trip':
             trip_status = 'Complete trip'
         else:
